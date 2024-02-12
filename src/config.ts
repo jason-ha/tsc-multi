@@ -24,6 +24,7 @@ const debug = Debug.extend("config");
 
 const targetSchema = type({
   extname: optional(string()),
+  dtsExtName: optional(string()),
   transpileOnly: optional(boolean()),
   outDir: optional(string()),
   packageOverrides: optional(

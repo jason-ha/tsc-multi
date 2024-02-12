@@ -7,12 +7,15 @@ import {
   isIncrementalCompilation,
 } from "../utils";
 import { createRewriteImportTransformer } from "../transformers/rewriteImport";
+import { createRewriteDtsImportTransformer } from "../transformers/rewriteDtsImport";
 import { WorkerOptions } from "./types";
 import { dirname, extname, join } from "path";
 
 const JS_EXT = ".js";
 const MAP_EXT = ".map";
 const JS_MAP_EXT = `${JS_EXT}${MAP_EXT}`;
+const DTS_EXT = ".d.ts";
+const DTS_MAP_EXT = `${DTS_EXT}${MAP_EXT}`;
 
 type TS = typeof ts;
 
@@ -83,13 +86,29 @@ export class Worker {
     return trimSuffix(path, JS_EXT) + this.data.extname;
   }
 
+  private getDtsPath(path: string): string {
+    if (!this.data.dtsExtName) return path;
+
+    return trimSuffix(path, DTS_EXT) + this.data.dtsExtName;
+  }
+
   private getJSMapPath(path: string): string {
     if (!this.data.extname) return path;
 
     return trimSuffix(path, JS_MAP_EXT) + this.data.extname + MAP_EXT;
   }
 
-  private rewritePath(path: string): string {
+  private getDtsMapPath(path: string): string {
+    if (!this.data.dtsExtName) return path;
+
+    return trimSuffix(path, DTS_MAP_EXT) + this.data.dtsExtName + MAP_EXT;
+  }
+
+  /**
+   * Rewrites an output file path based on its extension. If ignoreDts is true, then paths to .d.ts files will not be
+   * rewritten. This is used so that .d.ts file paths are only rewritten under specific circumstances.
+   */
+  private rewritePath(path: string, ignoreDts = false): string {
     if (path.endsWith(JS_EXT)) {
       return this.getJSPath(path);
     }
@@ -98,25 +117,65 @@ export class Worker {
       return this.getJSMapPath(path);
     }
 
+    if (ignoreDts === false) {
+      if (path.endsWith(DTS_EXT)) {
+        return this.getDtsPath(path);
+      }
+
+      if (path.endsWith(DTS_MAP_EXT)) {
+        return this.getDtsMapPath(path);
+      }
+    }
+
     return path;
   }
 
   private rewriteSourceMappingURL(data: string): string {
-    return data.replace(
-      /\/\/# sourceMappingURL=(.+)/g,
-      (_, path) => `//# sourceMappingURL=${this.getJSMapPath(path)}`
-    );
+    return data.replace(/\/\/# sourceMappingURL=(.+)/g, (_, path) => {
+      debug(
+        `replacing sourceMapUrl path: ${path} ==> ${this.rewritePath(path)}`
+      );
+      return `//# sourceMappingURL=${this.rewritePath(path)}`;
+    });
   }
 
   private rewriteSourceMap(data: string): string {
     const json = JSON.parse(data);
-    json.file = this.getJSPath(json.file);
+    debug(
+      `rewriting sourcemap: ${json.file} ==> ${this.rewritePath(json.file)}`
+    );
+    json.file = this.rewritePath(json.file);
     return JSON.stringify(json);
   }
 
   private createSystem(sys: Readonly<ts.System>): ts.System {
     const getReadPaths = (path: string) => {
-      const paths = [this.rewritePath(path)];
+      /**
+       * When reading paths, we don't want to rewrite the paths to DTS files, so we pass `true` to ignoreDts. If we
+       * rewrite dts paths here, we get compilation failures like this:
+       *
+       * [mjs]: error TS6053: File 'FluidFramework/node_modules/.pnpm/typescript@5.1.6/node_modules/typescript/lib/lib.dom.d.ts' not found.
+       *   The file is in the program because:
+       *     Library 'lib.dom.d.ts' specified in compilerOptions
+       * [mjs]: error TS6053: File 'FluidFramework/node_modules/.pnpm/typescript@5.1.6/node_modules/typescript/lib/lib.dom.iterable.d.ts' not found.
+       *   The file is in the program because:
+       *     Library 'lib.dom.iterable.d.ts' specified in compilerOptions
+       * [mjs]: error TS6053: File 'FluidFramework/node_modules/.pnpm/typescript@5.1.6/node_modules/typescript/lib/lib.es2020.d.ts' not found.
+       *   The file is in the program because:
+       *     Library 'lib.es2020.d.ts' specified in compilerOptions
+       * [mjs]: error TS2318: Cannot find global type 'Array'.
+       * [mjs]: error TS2318: Cannot find global type 'Boolean'.
+       * [mjs]: error TS2318: Cannot find global type 'CallableFunction'.
+       * [mjs]: error TS2318: Cannot find global type 'Function'.
+       * [mjs]: error TS2318: Cannot find global type 'IArguments'.
+       * [mjs]: error TS2318: Cannot find global type 'NewableFunction'.
+       * [mjs]: error TS2318: Cannot find global type 'Number'.
+       * [mjs]: error TS2318: Cannot find global type 'Object'.
+       * [mjs]: error TS2318: Cannot find global type 'RegExp'.
+       * [mjs]: error TS2318: Cannot find global type 'String'.
+       * [mjs]: Found 13 errors.
+       */
+      const paths = [this.rewritePath(path, true)];
 
       // Source files may be .js files when `allowJs` is enabled. When a .js
       // file with rewritten path doesn't exist, retry again without rewriting
@@ -179,11 +238,11 @@ export class Worker {
       writeFile: (path, data, writeByteOrderMark) => {
         const newPath = this.rewritePath(path);
         const newData = (() => {
-          if (path.endsWith(JS_EXT)) {
+          if (path.endsWith(JS_EXT) || path.endsWith(DTS_EXT)) {
             return this.rewriteSourceMappingURL(data);
           }
 
-          if (path.endsWith(JS_MAP_EXT)) {
+          if (path.endsWith(JS_MAP_EXT) || path.endsWith(DTS_MAP_EXT)) {
             return this.rewriteSourceMap(data);
           }
 
@@ -247,15 +306,37 @@ export class Worker {
   ) {
     const { createProgram, reportDiagnostic } = host;
 
-    const transformers: ts.CustomTransformers = {
-      after: [
-        createRewriteImportTransformer({
-          extname: this.data.extname || JS_EXT,
-          system: this.system,
-          ts: this.ts,
-        }),
-      ],
-    };
+    debug(`dtsExtName === ${this.data.dtsExtName}`);
+    const transformers: ts.CustomTransformers =
+      this.data.dtsExtName !== undefined
+        ? {
+            after: [
+              createRewriteImportTransformer({
+                extname: this.data.extname || JS_EXT,
+                dtsExtName: this.data.dtsExtName || DTS_EXT,
+                system: this.system,
+                ts: this.ts,
+              }),
+            ],
+            afterDeclarations: [
+              createRewriteDtsImportTransformer({
+                extname: this.data.extname || JS_EXT,
+                dtsExtName: this.data.dtsExtName || DTS_EXT,
+                system: this.system,
+                ts: this.ts,
+              }),
+            ],
+          }
+        : {
+            after: [
+              createRewriteImportTransformer({
+                extname: this.data.extname || JS_EXT,
+                dtsExtName: this.data.dtsExtName || DTS_EXT,
+                system: this.system,
+                ts: this.ts,
+              }),
+            ],
+          };
 
     const parseConfigFileHost: ts.ParseConfigFileHost = {
       ...this.system,
@@ -351,6 +432,7 @@ export class Worker {
       after: [
         createRewriteImportTransformer({
           extname: this.data.extname || JS_EXT,
+          dtsExtName: this.data.dtsExtName || DTS_EXT,
           system: this.system,
           ts: this.ts,
         }),

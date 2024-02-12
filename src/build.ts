@@ -123,7 +123,10 @@ export async function build({
 
   const codes = await pAll(
     targets.map(
-      ({ extname, transpileOnly, packageOverrides, ...target }, i) => {
+      (
+        { extname, dtsExtName, transpileOnly, packageOverrides, ...target },
+        i
+      ) => {
         const prefix = `[${trimPrefix(extname || DEFAULT_EXTNAME, ".")}]: `;
         const prefixStyle = reportStyles[i % reportStyles.length];
 
@@ -134,6 +137,7 @@ export async function build({
             stdout,
             stderr,
             extname,
+            dtsExtName,
             packageOverrides,
             target,
             reportPrefix: prefixStyle(prefix),

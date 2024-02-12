@@ -3,6 +3,7 @@ import { Target } from "../config";
 export interface WorkerOptions {
   target: Omit<Target, "extname">;
   extname?: string;
+  dtsExtName?: string;
   packageOverrides?: Record<
     string,
     Record<string, unknown> & { type?: "commonjs" | "module" }
