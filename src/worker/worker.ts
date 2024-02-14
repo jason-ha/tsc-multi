@@ -34,7 +34,9 @@ function normalizeSlashes(path: string): string {
     : path;
 }
 
-function hashPackageOverrides(overrides: WorkerOptions["packageOverrides"]) {
+function configKeyForPackageOverrides(
+  overrides: WorkerOptions["packageOverrides"]
+) {
   if (overrides === undefined) return "";
 
   const str = JSON.stringify(overrides);
@@ -46,7 +48,7 @@ function hashPackageOverrides(overrides: WorkerOptions["packageOverrides"]) {
     hash = (hash << 5) + hash + str.charCodeAt(i); // hash * 33 + c
     hash |= 0; // Convert to 32bit integer
   }
-  return hash;
+  return `.${hash}`;
 }
 
 export class Worker {
@@ -371,7 +373,9 @@ export class Worker {
       ) {
         config.options.tsBuildInfoFile = `${basePath}${
           this.data.extname ?? ""
-        }${hashPackageOverrides(this.data.packageOverrides)}.tsbuildinfo`;
+        }${configKeyForPackageOverrides(
+          this.data.packageOverrides
+        )}.tsbuildinfo`;
       }
 
       return config;
